@@ -5,6 +5,7 @@
 #include <sstream>
 #include <random>
 #include <algorithm>
+#include <cmath>
 
 struct DataSet {
     std::vector<int> id;
@@ -60,7 +61,8 @@ class Connection {
     public:
 
     Neuron* cn;
-    float weight;
+    float weight = 1.0f;
+    float accWeightAdjust = 0.0f;
 
     Connection() : cn(nullptr), weight(0.0f) {}
 
@@ -87,7 +89,9 @@ class Neuron {
     float value;
     std::vector<Connection> connections;
     std::vector<Neuron>* lastLayerNeurons;
-    float bias;
+    float bias = 0.0f;
+    float accBiasAdjust = 0.0f;
+    float accdCdA = 0.0f;
 
     Neuron() = default;
 
@@ -119,16 +123,53 @@ class Layer {
     }
 };
 
+void calcAcc(Layer& layer, std::vector<float>& expectedNeuronValue, bool isOutputLayer){
+
+    //get all layer weight adjustment amounts for one training example
+
+    for(int i = 0; i < layer.neurons.size(); i++){
+
+        float dCda = 0.0f;
+
+        if(isOutputLayer == true){
+            dCda = 2.0f*(layer.neurons[i].value - expectedNeuronValue[i]); //derivative of the cost function with respect to aj in this layer
+        } else {
+            dCda = layer.neurons[i].accdCdA;
+        }
+
+        //for each weight, run the cost calculation in the layer
+        float dadz = layer.neurons[i].value * (1.0f - layer.neurons[i].value); //derivative of sigmoid (just z*(1-z) where z is already the value in the neuron)
+        for(Connection& c : layer.neurons[i].connections){
+            float dzdw = c.cn->value; //this is simply the neuron value the weight is connected to by the simple derivative
+
+            float dCdw = dCda * dadz * dzdw; //cost for the weight for this layer in one training example
+
+            //add to the weight accumulation
+            c.accWeightAdjust += dCdw;
+
+            //summing dCdA for hidden layers
+            c.cn->accdCdA += dCda * dadz * c.weight;
+        }
+
+        //get all layer bias adjustment amounts for one training example
+
+        float dCdb = dadz * dCda;
+        layer.neurons[i].accBiasAdjust += dCdb;
+    }
+}
+
 void calculateNetwork(std::vector<Layer>& network){
     for(int i = 1; i < network.size(); i++){
         for(Neuron& n : network[i].neurons){
             float x = 0.0f;
 
-            for(Connection c : n.connections){
+            //calculate z
+            for(const Connection& c : n.connections){
                 x += c.weight * (*(c.cn)).value;
             }
             x += n.bias;
 
+            //sigmoid
             n.value = 1.0f/(1.0f + std::exp(-x));
         }
     }
@@ -150,14 +191,37 @@ int printFinalLayer(std::vector<Layer>& network){
     return index;
 }
 
+void printMNISTImage(const std::vector<int>& imgData, int label) {
+    std::cout << "\n--- Label: " << label << " ---\n";
+    for (int r = 0; r < 28; ++r) {
+        for (int c = 0; c < 28; ++c) {
+            int pixel = imgData[r * 28 + c]; // 0 to 255
+            
+            // Map pixel intensity to ASCII characters
+            if (pixel > 150) {
+                std::cout << "X "; // Dark (the digit)
+            } else if (pixel > 40) {
+                std::cout << ". "; // Medium gray (edges)
+            } else {
+                std::cout << "  "; // Light/Background (spaces)
+            }
+        }
+        std::cout << "\n";
+    }
+    std::cout << "-------------------\n";
+}
+
 int main(){
+    //load csv training data
     const char* trainPath = "../res/mnist_train.csv";
     const char* testPath = "../res/mnist_test.csv";  
 
     DataSet trainData = getData(trainPath);
+    DataSet testData = getData(testPath);
 
     std::cout << "Train data processed\n";
 
+    //create network
     std::vector<Layer> network;
     network.reserve(3);
 
@@ -165,6 +229,7 @@ int main(){
     network.emplace_back(300, 10);
     network.emplace_back(10, 1);
 
+    //wire neuron connections
     for(int i = 1; i < network.size(); i++){
         int numIncoming = network[i-1].neurons.size();
 
@@ -185,27 +250,90 @@ int main(){
 
     //set inputs and test
 
-    float accuracy = 0.0f;
-    int timesRight = 0;
+    int batchSize = 100000;
+    float learningRate = 0.1f;
+    float trainingExamples = 100.0f;
 
-    for(int k = 0; k < 10000; k++){
-        for(int i = 0; i < network[0].neurons.size(); i++){
-            network[0].neurons[i].value = (float)trainData.data[k][i] / 255.0f;
+    float accuracy = 0.0f;
+    int accCount = 0;
+
+    for(int b = 0; b < batchSize; b++){
+        for(int k = 0; k < trainingExamples; k++){
+            //inputs the number data
+            for(int i = 0; i < network[0].neurons.size(); i++){
+                network[0].neurons[i].value = (float)trainData.data[k][i] / 255.0f;
+            }
+            
+            calculateNetwork(network);
+
+            //BACKPROPAGATION
+
+            //reset dCdA for all neurons
+            for(Layer& l : network){
+                for(Neuron& n : l.neurons){
+                    n.accdCdA = 0.0f;
+                }
+            }
+
+            //getting a vector of expected result
+            std::vector<float> expectedValues;
+            for(int i = 0; i < 10; i++){
+                if(i == trainData.id[k]){
+                    expectedValues.push_back(1.0f);
+                } else {
+                    expectedValues.push_back(0.0f);
+                }
+            }
+
+            //calculate for all layers
+            for(int i = network.size()-1; i >= 1; i--){
+                if(i == network.size()-1){
+                    calcAcc(network[i], expectedValues, true);
+                } else {
+                    calcAcc(network[i], expectedValues, false);
+                }
+            }
         }
 
-        std::cout << "Network inputs processed\n";
+        //divide and adjust weights/biases
+        for(Layer& l : network){
+            for(Neuron& n : l.neurons){
+                for(Connection& c : n.connections){
+                    c.accWeightAdjust = c.accWeightAdjust / trainingExamples;
+                    c.weight -= learningRate * c.accWeightAdjust;
+                    c.accWeightAdjust = 0.0f;
+                }
+                n.accBiasAdjust = n.accBiasAdjust / trainingExamples;
+                n.bias -= learningRate * n.accBiasAdjust;
+                n.accBiasAdjust = 0.0f;
+            }
+        }
+
+        //----------------test a random one from test csv---------------------
+
+        //generate random case to test
+        std::random_device rd;  // Non-deterministic seed from the system
+        std::mt19937 gen(rd()); // Standard Mersenne Twister engine
+        std::uniform_int_distribution<int> distrib(0, testData.data.size()-1); // Range [0, 10000]
+
+        int randomTestCase = distrib(gen);
+
+        //inputs the test data
+        for(int i = 0; i < network[0].neurons.size(); i++){
+            network[0].neurons[i].value = (float)testData.data[randomTestCase][i] / 255.0f;
+        }
+
+        printMNISTImage(testData.data[randomTestCase], testData.id[randomTestCase]);
         
         calculateNetwork(network);
 
-        std::cout << "Network processed\n";
-
         int guess = printFinalLayer(network);
-        std::cout << "Its actually a " << trainData.id[k] << "!\n";
+        std::cout << "Its actually a " << testData.id[randomTestCase] << "!\n";
 
-        if(guess == trainData.id[k]){
-            timesRight++;
+        if(guess == testData.id[randomTestCase]){
+            accCount++;
         }
-        accuracy = (float) timesRight / k;
+        accuracy = (float) accCount / (b+1);
         std::cout << "Accuracy: " << accuracy << "\n";
     }
 
