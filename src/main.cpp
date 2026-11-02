@@ -225,8 +225,10 @@ int main(){
     std::vector<Layer> network;
     network.reserve(3);
 
-    network.emplace_back(784, 300);
-    network.emplace_back(300, 10);
+    network.emplace_back(784, 512);
+    network.emplace_back(512, 256);
+    network.emplace_back(256, 128);
+    network.emplace_back(128, 10);
     network.emplace_back(10, 1);
 
     //wire neuron connections
@@ -250,65 +252,74 @@ int main(){
 
     //set inputs and test
 
-    int batchSize = 100000;
+    int epochCount = 10000;
+    int batchSize = 32;
     float learningRate = 0.1f;
-    float trainingExamples = 100.0f;
+    float trainingExamples = 200.0f;
 
-    float accuracy = 0.0f;
-    int accCount = 0;
+    float totalAccuracy = 0.0f;
+    int totalCount = 0;
 
-    for(int b = 0; b < batchSize; b++){
-        for(int k = 0; k < trainingExamples; k++){
-            //inputs the number data
-            for(int i = 0; i < network[0].neurons.size(); i++){
-                network[0].neurons[i].value = (float)trainData.data[k][i] / 255.0f;
+    std::vector<bool> lastHundredTrack;
+    int lastHundredCount = 0;
+    float lastHundredAccuracy = 0.0f;
+
+    int streak = 0;
+    int maxStreak = 0;
+
+    for(int e = 0; e < epochCount; e++){
+        for(int b = 0; b < batchSize; b++){
+            for(int k = 0; k < trainingExamples; k++){
+                //inputs the number data
+                for(int i = 0; i < network[0].neurons.size(); i++){
+                    network[0].neurons[i].value = (float)trainData.data[k+b*trainingExamples][i] / 255.0f;
+                }
+                
+                calculateNetwork(network);
+
+                //BACKPROPAGATION
+
+                //reset dCdA for all neurons
+                for(Layer& l : network){
+                    for(Neuron& n : l.neurons){
+                        n.accdCdA = 0.0f;
+                    }
+                }
+
+                //getting a vector of expected result
+                std::vector<float> expectedValues;
+                for(int i = 0; i < 10; i++){
+                    if(i == trainData.id[k+b*trainingExamples]){
+                        expectedValues.push_back(1.0f);
+                    } else {
+                        expectedValues.push_back(0.0f);
+                    }
+                }
+
+                //calculate for all layers
+                for(int i = network.size()-1; i >= 1; i--){
+                    if(i == network.size()-1){
+                        calcAcc(network[i], expectedValues, true);
+                    } else {
+                        calcAcc(network[i], expectedValues, false);
+                    }
+                }
             }
-            
-            calculateNetwork(network);
 
-            //BACKPROPAGATION
-
-            //reset dCdA for all neurons
+            //divide and adjust weights/biases
             for(Layer& l : network){
                 for(Neuron& n : l.neurons){
-                    n.accdCdA = 0.0f;
-                }
-            }
-
-            //getting a vector of expected result
-            std::vector<float> expectedValues;
-            for(int i = 0; i < 10; i++){
-                if(i == trainData.id[k]){
-                    expectedValues.push_back(1.0f);
-                } else {
-                    expectedValues.push_back(0.0f);
-                }
-            }
-
-            //calculate for all layers
-            for(int i = network.size()-1; i >= 1; i--){
-                if(i == network.size()-1){
-                    calcAcc(network[i], expectedValues, true);
-                } else {
-                    calcAcc(network[i], expectedValues, false);
+                    for(Connection& c : n.connections){
+                        c.accWeightAdjust = c.accWeightAdjust / trainingExamples;
+                        c.weight -= learningRate * c.accWeightAdjust;
+                        c.accWeightAdjust = 0.0f;
+                    }
+                    n.accBiasAdjust = n.accBiasAdjust / trainingExamples;
+                    n.bias -= learningRate * n.accBiasAdjust;
+                    n.accBiasAdjust = 0.0f;
                 }
             }
         }
-
-        //divide and adjust weights/biases
-        for(Layer& l : network){
-            for(Neuron& n : l.neurons){
-                for(Connection& c : n.connections){
-                    c.accWeightAdjust = c.accWeightAdjust / trainingExamples;
-                    c.weight -= learningRate * c.accWeightAdjust;
-                    c.accWeightAdjust = 0.0f;
-                }
-                n.accBiasAdjust = n.accBiasAdjust / trainingExamples;
-                n.bias -= learningRate * n.accBiasAdjust;
-                n.accBiasAdjust = 0.0f;
-            }
-        }
-
         //----------------test a random one from test csv---------------------
 
         //generate random case to test
@@ -330,12 +341,45 @@ int main(){
         int guess = printFinalLayer(network);
         std::cout << "Its actually a " << testData.id[randomTestCase] << "!\n";
 
-        if(guess == testData.id[randomTestCase]){
-            accCount++;
+        //track last 100
+        if(lastHundredTrack.size() >= 100){
+            lastHundredTrack.erase(lastHundredTrack.begin());
         }
-        accuracy = (float) accCount / (b+1);
-        std::cout << "Accuracy: " << accuracy << "\n";
-    }
 
+        //if guess is correct
+        if(guess == testData.id[randomTestCase]){
+            totalCount++;
+            streak++;
+            lastHundredTrack.push_back(true);
+        } else {
+            streak = 0;
+            lastHundredTrack.push_back(false);
+        }
+
+        //update max streak
+        if(streak > maxStreak){
+            maxStreak = streak;
+        }
+
+        //calculate last hundred accuracy
+        lastHundredCount = 0;
+        for(bool t : lastHundredTrack){
+            if(t == true){
+                lastHundredCount++;
+            }
+        }
+        lastHundredAccuracy = (float) lastHundredCount / 100.0f;
+
+        //calculate total accuracy
+        totalAccuracy = (float) totalCount / (e+1);
+
+        //display results
+        std::cout << "Epoch: " << e+1 << " out of " << epochCount << "\n";
+        std::cout << "Total Accuracy: " << totalAccuracy << "\n";
+        std::cout << "Last 100 Accuracy: " << lastHundredAccuracy << "\n";
+        std::cout << "Streak: x" << streak << "\n";
+        std::cout << "Max Streak: x" << maxStreak << "\n";
+
+    }
     return 0;
 }
